@@ -26,8 +26,17 @@ def main():
     if not isinstance(data, list):
         data = []
 
-    # Create the log entry
+    next_idx = 0
+    if data:
+        max_idx = -1
+        for entry in data:
+            idx = entry.get("experiment_index", -1)
+            if idx > max_idx:
+                max_idx = idx
+        next_idx = max_idx + 1
+
     entry = {
+        "experiment_index": next_idx,
         "timestamp": datetime.now().isoformat(),
         "research_name": args.research_name,
         "filename_in_saver": args.filename_in_saver,
@@ -39,7 +48,8 @@ def main():
     with open(json_path, 'w') as f:
         json.dump(data, f, indent=4)
         
-    print(f"Logged {args.research_name} result with loss {args.loss} to {json_path}")
+    print(f"Logged {args.research_name} (Exp #{next_idx}) result with loss {args.loss} to {json_path}")
 
 if __name__ == "__main__":
     main()
+

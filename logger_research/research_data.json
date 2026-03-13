@@ -1,8 +1,9 @@
 [
     {
-        "timestamp": "2026-03-12T21:13:16.126870",
-        "research_name": "test_run",
-        "filename_in_saver": "Saver_Branches/test.txt",
-        "loss": 0.1
+        "experiment_index": 0,
+        "timestamp": "2026-03-13T14:32:48.587330",
+        "research_name": "baseline_run",
+        "filename_in_saver": "Saver_Branches/train.py_2026-03-13_14-31-08.saver.txt",
+        "loss": 1.157
     }
 ]

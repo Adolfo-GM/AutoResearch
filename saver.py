@@ -10,25 +10,31 @@ class Saver:
 
     def backup(self, file_path):
         if not os.path.isfile(file_path):
-            print(f"Error: The file '{file_path}' does not exist.")
             return
-
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        base_name = os.path.basename(file_path)
-        new_name = f"{base_name}_{timestamp}.saver.txt"
-        dest_path = os.path.join(self.backup_dir, new_name)
-
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        name = os.path.basename(file_path)
+        dest = os.path.join(self.backup_dir, f"{name}_{ts}.saver.txt")
         try:
-            shutil.copy2(file_path, dest_path)
-            print(f"Backed up '{file_path}' to '{dest_path}'")
-        except Exception as e:
-            print(f"Error backing up file: {e}")
+            shutil.copy2(file_path, dest)
+            print(f"Backed up {file_path} to {dest}")
+        except:
+            pass
+
+    def restore(self, backup_path, target_path="train.py"):
+        if not os.path.isfile(backup_path):
+            return
+        try:
+            shutil.copy2(backup_path, target_path)
+            print(f"Restored {backup_path} to {target_path}")
+        except:
+            pass
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python saver.py <filename>")
         sys.exit(1)
-        
-    file_to_backup = sys.argv[1]
+    
     saver = Saver()
-    saver.backup(file_to_backup)
+    if sys.argv[1] == "--restore" and len(sys.argv) > 2:
+        saver.restore(sys.argv[2])
+    else:
+        saver.backup(sys.argv[1])

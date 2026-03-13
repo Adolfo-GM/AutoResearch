@@ -1,29 +1,51 @@
-# AutoResearch
 
-This project is intended to be a lab that allows an AI agent to run AI experiments and the validation suite allows the research to be tested and validated, all research is organized, versioned and validated. This lab allows AI to perform independent artificial intelligence research and development.
+# AutoResearch Lab
 
-### File Backups
-You can use the `saver.py` script to back up a file by running `python saver.py <filename>`. It uses a `Saver` class to automatically create a `Saver_Branches/` directory, saving a copy of the specified file with the current date and time down to the second in the format `filename_{YYYY-MM-DD_HH-MM-SS}.saver.txt`.
+An experimental sandbox for autonomous AI research and development. This repository provides a structured environment for iterative training, version control, and performance benchmarking of character-level language models.
 
-### AI instructions
+![Benchmark Chart](logger_research/benchmark_chart.png)
 
-To work on AI R&D, you must only edit the train.py file, and before every edit, you must run the saver.py script to backup the file.
+## Overview
+The AutoResearch Lab is designed to enable AI agents to perform independent experiments. It features a custom micro-gradient engine, automated version control, and real-time logging to track progress and validate research hypotheses.
 
-### Logging Research
-You must use the `logger.py` script to log the results of a training run by running:
+## Project Components
+- `train.py`: Core research script containing the model architecture and training loop.
+- `saver.py`: Automated versioning utility for archiving and restoring experiment states.
+- `logger.py`: Centralized telemetry for recording loss metrics and metadata.
+- `benchmark.py`: Analytics suite for ranking experiments and generating performance visualizations.
+
+## Operational Commands
+
+### Version Control
 ```bash
-python3 logger.py --research_name "research_name" --filename_in_saver "Saver_Branches/filename_{YYYY-MM-DD_HH-MM-SS}.saver.txt" --loss "0.025"
+# Backup current research state
+python saver.py <filename>
+
+# Restore a specific version
+python saver.py --restore Saver_Branches/<timestamped_file>
 ```
-This will automatically save the entry in `logger_research/research_data.json`.
 
-### AI Workflow
-The AI works independently by following this loop:
-Begin by saving the initial file:
-0. Save the current state of `train.py` using `saver.py`.
+### Research Logging
+```bash
+python3 logger.py --research_name "id" --filename_in_saver "path/to/backup" --loss "#.###"
+```
 
-Then begin the research loop as follows:
-1. Edit `train.py` to test a new idea.
-2. Run the training for a maximum of 60 seconds, the training run must NOT exceed this time.
-3. Save the edited version of `train.py` using `saver.py`.
-4. Log the research results using `logger.py`. (Make sure to save the exact filename of the branch that gave the loss for the current run)
-5. Repeat the process and keep trying to make the loss as low as possible.
+### Analytics
+```bash
+# View ranked results and update benchmark_chart.png
+python benchmark.py
+```
+
+## Research Workflow
+1. **Preserve**: Backup `train.py` before any modifications.
+2. **Iterate**: Modify `train.py` to test new hypotheses.
+3. **Execute**: Run training with a strict **60-second time limit**.
+4. **Archive**: Save the resulting version of `train.py`.
+5. **Log**: Record metrics in the research database.
+6. **Analyze**: Run `benchmark.py` every 10 iterations to evaluate progress.
+
+## Mandatory Rules
+- **Target Selection**: Only `train.py` is authorized for modification by the AI agent.
+- **Dependency Control**: Use only standard Python libraries (e.g., `math`, `random`).
+- **Timing**: Training runs must NOT exceed 60 seconds.
+- **Frontier**: You cannot decrease the context length of the model, you may increase it. It can never be smaller than the initial run which is `block_size = 16`.
