@@ -57,8 +57,8 @@ class Value:
             for child, local_grad in zip(v._children, v._local_grads):
                 child.grad += local_grad * v.grad
 
-n_layer = 1
-n_embd = 16
+n_layer = 2
+n_embd = 8
 block_size = 16
 n_head = 1
 head_dim = n_embd // n_head
@@ -132,7 +132,7 @@ def gpt(token_id, pos_id, kv_state):
     logits = linear(x, state_dict['lm_head'])
     return logits
 
-learning_rate, beta1, beta2, eps_adam = 0.04, 0.85, 0.99, 1e-8
+learning_rate, beta1, beta2, eps_adam = 0.035, 0.85, 0.99, 1e-8
 m = [0.0] * len(params)
 v = [0.0] * len(params)
 

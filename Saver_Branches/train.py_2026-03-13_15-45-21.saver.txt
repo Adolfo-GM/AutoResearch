@@ -31,9 +31,14 @@ class Value:
         return Value(self.data * other.data, (self, other), (other.data, self.data))
 
     def __pow__(self, other): return Value(self.data**other, (self,), (other * self.data**(other-1),))
-    def log(self): return Value(math.log(self.data), (self,), (1/self.data,))
-    def exp(self): return Value(math.exp(self.data), (self,), (math.exp(self.data),))
+    def log(self): return Value(math.log(max(1e-15, self.data)), (self,), (1/max(1e-15, self.data),))
+    def exp(self):
+        clipped = max(-20, min(20, self.data))
+        return Value(math.exp(clipped), (self,), (math.exp(clipped),))
     def relu(self): return Value(max(0, self.data), (self,), (float(self.data > 0),))
+    def tanh(self):
+        t = math.tanh(self.data)
+        return Value(t, (self,), (1 - t**2,))
     def __neg__(self): return self * -1
     def __radd__(self, other): return self + other
     def __sub__(self, other): return self + (-other)
@@ -58,30 +63,26 @@ class Value:
                 child.grad += local_grad * v.grad
 
 n_layer = 1
-n_embd = 16
+n_embd = 8
 block_size = 16
 n_head = 1
 head_dim = n_embd // n_head
 matrix = lambda nout, nin, std=0.08: [[Value(random.gauss(0, std)) for _ in range(nin)] for _ in range(nout)]
+vector = lambda n, val=0.0: [Value(val) for _ in range(n)]
 
-# State Dict with Weight Tying
-state_dict = {
-    'wte': matrix(vocab_size, n_embd), 
-    'wpe': matrix(block_size, n_embd)
-}
-state_dict['lm_head'] = state_dict['wte'] # Weight Tying
-
+state_dict = {'wte': matrix(vocab_size, n_embd), 'wpe': matrix(block_size, n_embd), 'lm_head': matrix(vocab_size, n_embd)}
 for i in range(n_layer):
     state_dict[f'layer{i}.attn_wq'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wk'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wv'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wo'] = matrix(n_embd, n_embd)
-    state_dict[f'layer{i}.mlp_fc1'] = matrix(2 * n_embd, n_embd)
-    state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 2 * n_embd)
-    # Learnable decay for linear attention recurrence
-    state_dict[f'layer{i}.decay'] = [Value(2.0)] # Initialized to high value (near 1.0 after sigmoid)
-params = [p for mat in state_dict.values() for row in (mat if isinstance(mat[0], list) else [mat]) for p in row]
-params = list(dict.fromkeys(params))
+    # MoE: 2 Experts
+    state_dict[f'layer{i}.moe_router_w'] = matrix(1, n_embd)
+    state_dict[f'layer{i}.expert0_fc1'] = matrix(2 * n_embd, n_embd)
+    state_dict[f'layer{i}.expert0_fc2'] = matrix(n_embd, 2 * n_embd)
+    state_dict[f'layer{i}.expert1_fc1'] = matrix(2 * n_embd, n_embd)
+    state_dict[f'layer{i}.expert1_fc2'] = matrix(n_embd, 2 * n_embd)
+params = [p for mat in state_dict.values() for row in mat for p in row]
 print(f"num params: {len(params)}")
 
 def linear(x, w):
@@ -98,41 +99,59 @@ def rmsnorm(x):
     scale = (ms + 1e-5) ** -0.5
     return [xi * scale for xi in x]
 
-def gpt(token_id, pos_id, kv_state):
+def gpt(token_id, pos_id, keys, values):
     tok_emb = state_dict['wte'][token_id]
     pos_emb = state_dict['wpe'][pos_id]
     x = [t + p for t, p in zip(tok_emb, pos_emb)]
     x = rmsnorm(x)
 
     for li in range(n_layer):
-        x_norm = rmsnorm(x)
+        x_residual = x
+        x = rmsnorm(x)
+        q = linear(x, state_dict[f'layer{li}.attn_wq'])
+        k = linear(x, state_dict[f'layer{li}.attn_wk'])
+        v = linear(x, state_dict[f'layer{li}.attn_wv'])
+        keys[li].append(k)
+        values[li].append(v)
+        x_attn = []
+        for h in range(n_head):
+            hs = h * head_dim
+            q_h = q[hs:hs+head_dim]
+            k_h = [ki[hs:hs+head_dim] for ki in keys[li]]
+            v_h = [vi[hs:hs+head_dim] for vi in values[li]]
+            attn_logits = [sum(q_h[j] * k_h[t][j] for j in range(head_dim)) / head_dim**0.5 for t in range(len(k_h))]
+            attn_weights = softmax(attn_logits)
+            head_out = [sum(attn_weights[t] * v_h[t][j] for t in range(len(v_h))) for j in range(head_dim)]
+            x_attn.extend(head_out)
+        x = linear(x_attn, state_dict[f'layer{li}.attn_wo'])
+        x = [a + b for a, b in zip(x, x_residual)]
         
-        # Parallel Linear Attention with Learnable Decay
-        q = linear(x_norm, state_dict[f'layer{li}.attn_wq'])
-        k = linear(x_norm, state_dict[f'layer{li}.attn_wk'])
-        v = linear(x_norm, state_dict[f'layer{li}.attn_wv'])
+        # MoE Block
+        x_residual = x
+        x = rmsnorm(x)
         
-        # Forget gate-like decay
-        d = state_dict[f'layer{li}.decay'][0]
-        gate = 1 / (1 + (-d).exp())
+        # Router
+        router_logits = linear(x, state_dict[f'layer{li}.moe_router_w'])
+        gate = [1 / (1 + (-ri).exp()) if ri.data >= 0 else ri.exp() / (1 + ri.exp()) for ri in router_logits][0]
         
-        for j in range(n_embd):
-            kv_state[li][j] = gate * kv_state[li][j] + k[j] * v[j]
+        # Expert 0
+        e0 = linear(x, state_dict[f'layer{li}.expert0_fc1'])
+        e0 = [ei.relu() for ei in e0]
+        e0 = linear(e0, state_dict[f'layer{li}.expert0_fc2'])
         
-        attn_out = [q[j] * kv_state[li][j] for j in range(n_embd)]
-        attn_out = linear(attn_out, state_dict[f'layer{li}.attn_wo'])
+        # Expert 1
+        e1 = linear(x, state_dict[f'layer{li}.expert1_fc1'])
+        e1 = [ei.relu() for ei in e1]
+        e1 = linear(e1, state_dict[f'layer{li}.expert1_fc2'])
         
-        # Parallel MLP
-        mlp_out = linear(x_norm, state_dict[f'layer{li}.mlp_fc1'])
-        mlp_out = [xi.relu() for xi in mlp_out]
-        mlp_out = linear(mlp_out, state_dict[f'layer{li}.mlp_fc2'])
-        
-        x = [xi + ai + mi for xi, ai, mi in zip(x, attn_out, mlp_out)]
+        # Expert Merging
+        x = [gate * a + (Value(1.0) - gate) * b for a, b in zip(e0, e1)]
+        x = [a + b for a, b in zip(x, x_residual)]
 
     logits = linear(x, state_dict['lm_head'])
     return logits
 
-learning_rate, beta1, beta2, eps_adam = 0.04, 0.85, 0.99, 1e-8
+learning_rate, beta1, beta2, eps_adam = 0.015, 0.85, 0.99, 1e-8
 m = [0.0] * len(params)
 v = [0.0] * len(params)
 
@@ -149,17 +168,22 @@ while True:
     tokens = [BOS] + [uchars.index(ch) for ch in doc] + [BOS]
     n = min(block_size, len(tokens) - 1)
 
-    kv_state = [[Value(0.0) for _ in range(n_embd)] for _ in range(n_layer)]
+    keys, values = [[] for _ in range(n_layer)], [[] for _ in range(n_layer)]
     losses = []
     for pos_id in range(n):
         token_id, target_id = tokens[pos_id], tokens[pos_id + 1]
-        logits = gpt(token_id, pos_id, kv_state)
+        logits = gpt(token_id, pos_id, keys, values)
         probs = softmax(logits)
         loss_t = -probs[target_id].log()
         losses.append(loss_t)
     loss = (1 / n) * sum(losses)
 
     loss.backward()
+
+    # Gradient clipping
+    gnorm = sum(p.grad**2 for p in params)**0.5
+    if gnorm > 1.0:
+        for p in params: p.grad /= gnorm
 
     lr_t = learning_rate * max(0.0, 1 - elapsed / target_duration)
     for i, p in enumerate(params):
@@ -178,11 +202,11 @@ print(f"\nfinal_loss={loss.data:.4f}")
 temperature = 0.5
 print("\n--- inference ---")
 for sample_idx in range(20):
-    kv_state = [[Value(0.0) for _ in range(n_embd)] for _ in range(n_layer)]
+    keys, values = [[] for _ in range(n_layer)], [[] for _ in range(n_layer)]
     token_id = BOS
     sample = []
     for pos_id in range(block_size):
-        logits = gpt(token_id, pos_id, kv_state)
+        logits = gpt(token_id, pos_id, keys, values)
         probs = softmax([l / temperature for l in logits])
         token_id = random.choices(range(vocab_size), weights=[p.data for p in probs])[0]
         if token_id == BOS:

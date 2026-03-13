@@ -31,9 +31,14 @@ class Value:
         return Value(self.data * other.data, (self, other), (other.data, self.data))
 
     def __pow__(self, other): return Value(self.data**other, (self,), (other * self.data**(other-1),))
-    def log(self): return Value(math.log(self.data), (self,), (1/self.data,))
-    def exp(self): return Value(math.exp(self.data), (self,), (math.exp(self.data),))
+    def log(self): return Value(math.log(max(1e-15, self.data)), (self,), (1/max(1e-15, self.data),))
+    def exp(self):
+        clipped = max(-20, min(20, self.data))
+        return Value(math.exp(clipped), (self,), (math.exp(clipped),))
     def relu(self): return Value(max(0, self.data), (self,), (float(self.data > 0),))
+    def tanh(self):
+        t = math.tanh(self.data)
+        return Value(t, (self,), (1 - t**2,))
     def __neg__(self): return self * -1
     def __radd__(self, other): return self + other
     def __sub__(self, other): return self + (-other)
@@ -57,20 +62,15 @@ class Value:
             for child, local_grad in zip(v._children, v._local_grads):
                 child.grad += local_grad * v.grad
 
-n_layer = 1
-n_embd = 16
+n_layer = 2
+n_embd = 8
 block_size = 16
-n_head = 1
-head_dim = n_embd // n_head
 matrix = lambda nout, nin, std=0.08: [[Value(random.gauss(0, std)) for _ in range(nin)] for _ in range(nout)]
 
-# State Dict with Weight Tying
 state_dict = {
-    'wte': matrix(vocab_size, n_embd), 
-    'wpe': matrix(block_size, n_embd)
+    'wte': matrix(vocab_size, n_embd),
+    'lm_head': matrix(vocab_size, n_embd)
 }
-state_dict['lm_head'] = state_dict['wte'] # Weight Tying
-
 for i in range(n_layer):
     state_dict[f'layer{i}.attn_wq'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wk'] = matrix(n_embd, n_embd)
@@ -78,10 +78,8 @@ for i in range(n_layer):
     state_dict[f'layer{i}.attn_wo'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.mlp_fc1'] = matrix(2 * n_embd, n_embd)
     state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 2 * n_embd)
-    # Learnable decay for linear attention recurrence
-    state_dict[f'layer{i}.decay'] = [Value(2.0)] # Initialized to high value (near 1.0 after sigmoid)
-params = [p for mat in state_dict.values() for row in (mat if isinstance(mat[0], list) else [mat]) for p in row]
-params = list(dict.fromkeys(params))
+
+params = [p for mat in state_dict.values() for row in mat for p in row]
 print(f"num params: {len(params)}")
 
 def linear(x, w):
@@ -98,41 +96,45 @@ def rmsnorm(x):
     scale = (ms + 1e-5) ** -0.5
     return [xi * scale for xi in x]
 
-def gpt(token_id, pos_id, kv_state):
-    tok_emb = state_dict['wte'][token_id]
-    pos_emb = state_dict['wpe'][pos_id]
-    x = [t + p for t, p in zip(tok_emb, pos_emb)]
-    x = rmsnorm(x)
+def apply_rope(x, pos):
+    out = []
+    for i in range(0, len(x), 2):
+        theta = pos / (10000 ** (i / len(x)))
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        a, b = x[i], x[i+1]
+        out.append(a * cos_t - b * sin_t)
+        out.append(a * sin_t + b * cos_t)
+    return out
 
+def gpt(token_id, pos_id, kv_state):
+    x = state_dict['wte'][token_id]
+    
     for li in range(n_layer):
         x_norm = rmsnorm(x)
         
-        # Parallel Linear Attention with Learnable Decay
-        q = linear(x_norm, state_dict[f'layer{li}.attn_wq'])
-        k = linear(x_norm, state_dict[f'layer{li}.attn_wk'])
+        # Parallel Linear Attention
+        q = apply_rope(linear(x_norm, state_dict[f'layer{li}.attn_wq']), pos_id)
+        k = apply_rope(linear(x_norm, state_dict[f'layer{li}.attn_wk']), pos_id)
         v = linear(x_norm, state_dict[f'layer{li}.attn_wv'])
         
-        # Forget gate-like decay
-        d = state_dict[f'layer{li}.decay'][0]
-        gate = 1 / (1 + (-d).exp())
-        
+        # Linear Recurrence (O(N))
         for j in range(n_embd):
-            kv_state[li][j] = gate * kv_state[li][j] + k[j] * v[j]
+            kv_state[li][j] = kv_state[li][j] + k[j] * v[j]
         
-        attn_out = [q[j] * kv_state[li][j] for j in range(n_embd)]
-        attn_out = linear(attn_out, state_dict[f'layer{li}.attn_wo'])
+        x_attn = [q[j] * kv_state[li][j] for j in range(n_embd)]
+        x_attn = linear(x_attn, state_dict[f'layer{li}.attn_wo'])
         
         # Parallel MLP
-        mlp_out = linear(x_norm, state_dict[f'layer{li}.mlp_fc1'])
-        mlp_out = [xi.relu() for xi in mlp_out]
-        mlp_out = linear(mlp_out, state_dict[f'layer{li}.mlp_fc2'])
+        x_mlp = linear(x_norm, state_dict[f'layer{li}.mlp_fc1'])
+        x_mlp = [xi.relu() for xi in x_mlp]
+        x_mlp = linear(x_mlp, state_dict[f'layer{li}.mlp_fc2'])
         
-        x = [xi + ai + mi for xi, ai, mi in zip(x, attn_out, mlp_out)]
+        x = [xi + ai + mi for xi, ai, mi in zip(x, x_attn, x_mlp)]
 
-    logits = linear(x, state_dict['lm_head'])
+    logits = linear(rmsnorm(x), state_dict['lm_head'])
     return logits
 
-learning_rate, beta1, beta2, eps_adam = 0.04, 0.85, 0.99, 1e-8
+learning_rate, beta1, beta2, eps_adam = 0.035, 0.85, 0.99, 1e-8
 m = [0.0] * len(params)
 v = [0.0] * len(params)
 
@@ -160,6 +162,11 @@ while True:
     loss = (1 / n) * sum(losses)
 
     loss.backward()
+
+    # Gradient clipping
+    gnorm = sum(p.grad**2 for p in params)**0.5
+    if gnorm > 1.0:
+        for p in params: p.grad /= gnorm
 
     lr_t = learning_rate * max(0.0, 1 - elapsed / target_duration)
     for i, p in enumerate(params):

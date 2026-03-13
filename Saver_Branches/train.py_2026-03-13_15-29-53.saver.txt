@@ -58,7 +58,7 @@ class Value:
                 child.grad += local_grad * v.grad
 
 n_layer = 1
-n_embd = 16
+n_embd = 12
 block_size = 16
 n_head = 1
 head_dim = n_embd // n_head
@@ -78,9 +78,9 @@ for i in range(n_layer):
     state_dict[f'layer{i}.attn_wo'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.mlp_fc1'] = matrix(2 * n_embd, n_embd)
     state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 2 * n_embd)
-    # Learnable decay for linear attention recurrence
-    state_dict[f'layer{i}.decay'] = [Value(2.0)] # Initialized to high value (near 1.0 after sigmoid)
-params = [p for mat in state_dict.values() for row in (mat if isinstance(mat[0], list) else [mat]) for p in row]
+
+params = [p for mat in state_dict.values() for row in mat for p in row]
+# Deduplicate params due to weight tying
 params = list(dict.fromkeys(params))
 print(f"num params: {len(params)}")
 
@@ -107,17 +107,14 @@ def gpt(token_id, pos_id, kv_state):
     for li in range(n_layer):
         x_norm = rmsnorm(x)
         
-        # Parallel Linear Attention with Learnable Decay
+        # Linear Attention
         q = linear(x_norm, state_dict[f'layer{li}.attn_wq'])
         k = linear(x_norm, state_dict[f'layer{li}.attn_wk'])
         v = linear(x_norm, state_dict[f'layer{li}.attn_wv'])
         
-        # Forget gate-like decay
-        d = state_dict[f'layer{li}.decay'][0]
-        gate = 1 / (1 + (-d).exp())
-        
+        # Simple recurrent accumulation for linear attn
         for j in range(n_embd):
-            kv_state[li][j] = gate * kv_state[li][j] + k[j] * v[j]
+            kv_state[li][j] = kv_state[li][j] + k[j] * v[j]
         
         attn_out = [q[j] * kv_state[li][j] for j in range(n_embd)]
         attn_out = linear(attn_out, state_dict[f'layer{li}.attn_wo'])
@@ -127,6 +124,7 @@ def gpt(token_id, pos_id, kv_state):
         mlp_out = [xi.relu() for xi in mlp_out]
         mlp_out = linear(mlp_out, state_dict[f'layer{li}.mlp_fc2'])
         
+        # Parallel summation
         x = [xi + ai + mi for xi, ai, mi in zip(x, attn_out, mlp_out)]
 
     logits = linear(x, state_dict['lm_head'])
@@ -149,6 +147,7 @@ while True:
     tokens = [BOS] + [uchars.index(ch) for ch in doc] + [BOS]
     n = min(block_size, len(tokens) - 1)
 
+    # State init for linear attn
     kv_state = [[Value(0.0) for _ in range(n_embd)] for _ in range(n_layer)]
     losses = []
     for pos_id in range(n):

@@ -57,8 +57,8 @@ class Value:
             for child, local_grad in zip(v._children, v._local_grads):
                 child.grad += local_grad * v.grad
 
-n_layer = 1
-n_embd = 16
+n_layer = 2
+n_embd = 8
 block_size = 16
 n_head = 1
 head_dim = n_embd // n_head
@@ -78,8 +78,10 @@ for i in range(n_layer):
     state_dict[f'layer{i}.attn_wo'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.mlp_fc1'] = matrix(2 * n_embd, n_embd)
     state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 2 * n_embd)
-    # Learnable decay for linear attention recurrence
-    state_dict[f'layer{i}.decay'] = [Value(2.0)] # Initialized to high value (near 1.0 after sigmoid)
+    # Learnable skip gains for SkipInit
+    state_dict[f'layer{i}.skip_a'] = [Value(0.01)]
+    state_dict[f'layer{i}.skip_m'] = [Value(0.01)]
+
 params = [p for mat in state_dict.values() for row in (mat if isinstance(mat[0], list) else [mat]) for p in row]
 params = list(dict.fromkeys(params))
 print(f"num params: {len(params)}")
@@ -107,17 +109,13 @@ def gpt(token_id, pos_id, kv_state):
     for li in range(n_layer):
         x_norm = rmsnorm(x)
         
-        # Parallel Linear Attention with Learnable Decay
+        # Parallel Linear Attention
         q = linear(x_norm, state_dict[f'layer{li}.attn_wq'])
         k = linear(x_norm, state_dict[f'layer{li}.attn_wk'])
         v = linear(x_norm, state_dict[f'layer{li}.attn_wv'])
         
-        # Forget gate-like decay
-        d = state_dict[f'layer{li}.decay'][0]
-        gate = 1 / (1 + (-d).exp())
-        
         for j in range(n_embd):
-            kv_state[li][j] = gate * kv_state[li][j] + k[j] * v[j]
+            kv_state[li][j] = kv_state[li][j] + k[j] * v[j]
         
         attn_out = [q[j] * kv_state[li][j] for j in range(n_embd)]
         attn_out = linear(attn_out, state_dict[f'layer{li}.attn_wo'])
@@ -127,7 +125,9 @@ def gpt(token_id, pos_id, kv_state):
         mlp_out = [xi.relu() for xi in mlp_out]
         mlp_out = linear(mlp_out, state_dict[f'layer{li}.mlp_fc2'])
         
-        x = [xi + ai + mi for xi, ai, mi in zip(x, attn_out, mlp_out)]
+        # SkipInit summing
+        ga, gm = state_dict[f'layer{li}.skip_a'][0], state_dict[f'layer{li}.skip_m'][0]
+        x = [xi + ga * ai + gm * mi for xi, ai, mi in zip(x, attn_out, mlp_out)]
 
     logits = linear(x, state_dict['lm_head'])
     return logits

@@ -56,13 +56,6 @@ def main():
         ax.step(passed_df["experiment_index"], passed_df["loss"], where="post", 
                 color="#27ae60", alpha=0.3, linestyle='--')
 
-        for _, row in passed_df.iterrows():
-            desc = str(row["research_name"]).strip()
-            if len(desc) > 25:
-                desc = desc[:22] + "..."
-            ax.annotate(desc, (row["experiment_index"], row["loss"]),
-                        textcoords="offset points", xytext=(0, 10), 
-                        fontsize=8, color="#1a7a3a", ha="center")
 
         ax.set_xlabel("Experiment #", fontsize=10)
         ax.set_ylabel("Loss", fontsize=10)
