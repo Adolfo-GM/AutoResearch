@@ -31,8 +31,10 @@ class Value:
         return Value(self.data * other.data, (self, other), (other.data, self.data))
 
     def __pow__(self, other): return Value(self.data**other, (self,), (other * self.data**(other-1),))
-    def log(self): return Value(math.log(self.data), (self,), (1/self.data,))
-    def exp(self): return Value(math.exp(self.data), (self,), (math.exp(self.data),))
+    def log(self): return Value(math.log(max(1e-15, self.data)), (self,), (1/max(1e-15, self.data),))
+    def exp(self):
+        clipped = max(-20, min(20, self.data))
+        return Value(math.exp(clipped), (self,), (math.exp(clipped),))
     def relu(self): return Value(max(0, self.data), (self,), (float(self.data > 0),))
     def __neg__(self): return self * -1
     def __radd__(self, other): return self + other
@@ -57,9 +59,9 @@ class Value:
             for child, local_grad in zip(v._children, v._local_grads):
                 child.grad += local_grad * v.grad
 
-n_layer = 1
-n_embd = 16
-block_size = 16
+n_layer = 2
+n_embd = 10
+block_size = 24
 n_head = 1
 head_dim = n_embd // n_head
 matrix = lambda nout, nin, std=0.08: [[Value(random.gauss(0, std)) for _ in range(nin)] for _ in range(nout)]
@@ -76,10 +78,14 @@ for i in range(n_layer):
     state_dict[f'layer{i}.attn_wk'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wv'] = matrix(n_embd, n_embd)
     state_dict[f'layer{i}.attn_wo'] = matrix(n_embd, n_embd)
-    state_dict[f'layer{i}.mlp_fc1'] = matrix(2 * n_embd, n_embd)
-    state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 2 * n_embd)
-    # Learnable decay for linear attention recurrence
-    state_dict[f'layer{i}.decay'] = [Value(2.0)] # Initialized to high value (near 1.0 after sigmoid)
+    state_dict[f'layer{i}.mlp_fc1'] = matrix(3 * n_embd, n_embd)
+    state_dict[f'layer{i}.mlp_fc2'] = matrix(n_embd, 3 * n_embd)
+    # Input-dependent decay
+    state_dict[f'layer{i}.decay_w'] = matrix(1, n_embd)
+    state_dict[f'layer{i}.decay_b'] = [Value(2.5)]
+    # SkipInit learnable scales
+    state_dict[f'layer{i}.attn_alpha'] = [Value(0.05)]
+    state_dict[f'layer{i}.mlp_alpha'] = [Value(0.05)]
 params = [p for mat in state_dict.values() for row in (mat if isinstance(mat[0], list) else [mat]) for p in row]
 params = list(dict.fromkeys(params))
 print(f"num params: {len(params)}")
@@ -107,14 +113,13 @@ def gpt(token_id, pos_id, kv_state):
     for li in range(n_layer):
         x_norm = rmsnorm(x)
         
-        # Parallel Linear Attention with Learnable Decay
+        # Parallel Linear Attention
         q = linear(x_norm, state_dict[f'layer{li}.attn_wq'])
         k = linear(x_norm, state_dict[f'layer{li}.attn_wk'])
         v = linear(x_norm, state_dict[f'layer{li}.attn_wv'])
         
-        # Forget gate-like decay
-        d = state_dict[f'layer{li}.decay'][0]
-        gate = 1 / (1 + (-d).exp())
+        d_logit = linear(x_norm, state_dict[f'layer{li}.decay_w'])[0] + state_dict[f'layer{li}.decay_b'][0]
+        gate = 1 / (1 + (-d_logit).exp())
         
         for j in range(n_embd):
             kv_state[li][j] = gate * kv_state[li][j] + k[j] * v[j]
@@ -122,17 +127,21 @@ def gpt(token_id, pos_id, kv_state):
         attn_out = [q[j] * kv_state[li][j] for j in range(n_embd)]
         attn_out = linear(attn_out, state_dict[f'layer{li}.attn_wo'])
         
-        # Parallel MLP
+        # Parallel MLP with GeLU approximation
         mlp_out = linear(x_norm, state_dict[f'layer{li}.mlp_fc1'])
-        mlp_out = [xi.relu() for xi in mlp_out]
+        # GeLU(x) ~ x * sigmoid(1.702 * x)
+        mlp_out = [val / (1 + (-1.702 * val).exp()) for val in mlp_out]
         mlp_out = linear(mlp_out, state_dict[f'layer{li}.mlp_fc2'])
         
-        x = [xi + ai + mi for xi, ai, mi in zip(x, attn_out, mlp_out)]
+        # SkipInit residuals
+        aa = state_dict[f'layer{li}.attn_alpha'][0]
+        am = state_dict[f'layer{li}.mlp_alpha'][0]
+        x = [xi + aa * ai + am * mi for xi, ai, mi in zip(x, attn_out, mlp_out)]
 
     logits = linear(x, state_dict['lm_head'])
     return logits
 
-learning_rate, beta1, beta2, eps_adam = 0.04, 0.85, 0.99, 1e-8
+learning_rate, beta1, beta2, eps_adam = 0.038, 0.9, 0.999, 1e-8
 m = [0.0] * len(params)
 v = [0.0] * len(params)
 

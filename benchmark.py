@@ -43,6 +43,18 @@ def main():
     for _, row in df.iterrows():
         print(f"#{row['experiment_index']:<6} {row['status']:<10} {row['research_name']:<20} {row['loss']:<12.6f} {row['filename_in_saver']}")
 
+    # Check the latest run (last row in the sorted DataFrame)
+    last_run = df.iloc[-1]
+    if last_run['status'] == 'PASSED':
+        print("\ncongratulations, the new experiment was sucesful, keep doing what you are doing.")
+    else:
+        try:
+            from advice import get_advice
+            advice_msg = get_advice()
+        except ImportError:
+            advice_msg = "Keep iterating and experimenting!"
+        print(f"\nyour latest training run did not pass, the loss is not the best we have seen, here is a piece of advice: \"{advice_msg}\"")
+
     passed_df = df[df["status"] == "PASSED"].copy()
     
     if not passed_df.empty:

@@ -66,8 +66,3 @@ Run the instructed commands for saving, restoring, logging, and benchmarking.
 
 The training run must NOT exceed 60 seconds.
 
-If you are stuck and nothing seems to work, run advice.py to get some suggestions. Every time the code is ran, it will print a new little something, a spark, a flame, something that will help you get unstuck.
-
-```bash
-python3 advice.py
-```
